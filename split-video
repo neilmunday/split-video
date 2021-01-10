@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+
+#
+#    This file is part of split-video.
+#
+#    split-video allows a given video file to be split into
+#    a number of parts using given duration.
+#
+#    Copyright (C) 2021 Neil Munday (neil@mundayweb.com)
+#
+#    split-video is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    split-video is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with split-video.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+import argparse
+import logging
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+def checkFile(f):
+    if not os.path.exists(f):
+        die("Error: %s does not exist!" % f, True)
+    if not os.path.isfile(f):
+        die("Error: %s is not a file!" % f, True)
+
+def die(msg):
+    logging.error(msg)
+    sys.exit(1)
+
+def runCommand(cmd, dieOnFailure=True):
+    '''
+    Execute the given command and return a tuple that contains the
+    return code, std out and std err output.
+    '''
+    logging.debug('running %s' % cmd)
+    process = subprocess.Popen(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    stdout = stdout.decode()
+    stderr = stderr.decode()
+    if process.returncode != 0 and dieOnFailure:
+        die("failed to execute %s\nstdout:\n%s\nstderr:\n%s" % (cmd, stdout, stderr))
+    return (process.returncode, stdout, stderr)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Split the given video into a number of parts based on the desired duration', add_help=True)
+    parser.add_argument('-v', '--verbose', help='Turn on debug messages', dest='verbose', action='store_true')
+    parser.add_argument('-i', '--input', help='Input video', dest='input', required=True)
+    parser.add_argument('-d', '--duration', help='How long each part should be in seconds', dest='duration', required=True, type=int)
+    parser.add_argument('-f', '--force', help='Remove existing output files if they already exist', dest='force', action='store_true')
+    args = parser.parse_args()
+
+    logLevel = logging.INFO
+    if args.verbose:
+        logLevel = logging.DEBUG
+    logging.basicConfig(format='%(asctime)s:%(levelname)s: %(message)s', datefmt='%Y/%m/%d %H:%M:%S', level=logLevel)
+
+    if args.duration < 1:
+        die("Duration must be a positive integer")
+
+    checkFile(args.input)
+
+    outputFile, extension = os.path.splitext(args.input)
+
+    # get length of video
+    rtn, stdout, stderr = runCommand("ffmpeg -i \"%s\"" % args.input, False)
+
+    durationRe = re.compile("Duration: ([0-9]+):([0-9]+):([0-9]+\.[0-9]+)")
+
+    for line in stderr.split("\n"):
+        match = durationRe.search(line)
+        if match:
+            hours = int(match.group(1))
+            mins = int(match.group(2))
+            secs = float(match.group(3))
+            break
+
+    length = (hours * 3600) + (mins * 60) + secs
+    logging.info("%s length: %d:%d:%.02f = %.02f seconds" % (args.input, hours, mins, secs, length))
+
+    if args.duration > length:
+        die("Duration of parts cannot be greater than the length of the input video")
+
+    # split the video based on duration
+    parts = int(round((length / args.duration) + 0.5))
+    logging.info("no. of parts = %d" % parts)
+
+    start = 0
+
+    for i in range(0, parts):
+        filename = "%s-part%d%s" % (outputFile, (i + 1), extension)
+        logging.info("creating part %d: %s" % ((i + 1), filename))
+        start = (i * args.duration)
+        logging.debug("start: %d" % start)
+        if os.path.exists(filename):
+            if args.force:
+                logging.info("deleting existing file: %s" % filename)
+                os.remove(filename)
+            else:
+                die("%s already exists!" % filename)
+        if i == parts - 1:
+            # last part doesn't need a duration, ffmpeg will assume the end of the video
+            cmd = 'ffmpeg -i "%s" -ss %d -c copy "%s"' % (args.input, start, filename)
+        else:
+            cmd = 'ffmpeg -i "%s" -ss %d -t %d -c copy "%s"' % (args.input, start, args.duration, filename)
+        runCommand(cmd)
